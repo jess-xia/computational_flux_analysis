@@ -1,0 +1,158 @@
+Update to the newest version of R and install METAFlux
+```{r, eval=FALSE}
+install.packages("installr")
+library(installr)
+updateR()
+
+devtools::install_github('KChen-lab/METAFlux')
+```
+
+```{r}
+library(METAFlux)
+library(readxl)
+
+# Returns a tibble, does not support row names
+GSC_culture_expression <- read_excel("C:/research/GBM_cultures_only_gene_expression_matrix.xlsx")
+
+# Convert to dataframe and set the first column as rownames
+GSC_culture_expression <- as.data.frame(GSC_culture_expression)
+rownames(GSC_culture_expression) <- GSC_culture_expression[[1]]
+GSC_culture_expression[[1]] <- NULL
+
+View(GSC_culture_expression)
+```
+
+Calculate the MRAS (Metabolic Reaction Activity Score)
+
+```{r}
+# METAFlux only accepts positive values, replace negative values with a small positive number 
+# Get positions (row/column) of non-positive values
+which(GSC_culture_expression <= 0, arr.ind = TRUE)
+GSC_culture_expression[GSC_culture_expression < 0] <- 1e-5
+
+GSC_scores<-calculate_reaction_score(GSC_culture_expression)
+```
+
+Calculate flux
+
+```{r}
+#Calculate flux for cell line data
+GSC_flux<-compute_flux(mras=GSC_scores,medium = cell_medium) 
+```
+
+Using GSVA, identify which cell lines are developmental and which are IR
+
+```{r}
+library(GSVA)
+
+signatures <- read_excel("C:/research/43018_2020_154_MOESM9_ESM (8).xlsx")
+signatures_df <- as.data.frame(signatures)
+
+head(signatures_df, n = 10)
+
+# Filter genes in the Developmental group
+developmental_genes <- signatures_df$Gene[signatures_df$Group == "Developmental"]
+length(developmental_genes)
+# Filter genes in the Injury Response group
+injury_response_genes <- signatures_df$Gene[signatures_df$Group == "Injury_Response"]
+length(injury_response_genes)
+
+combined_signatures <- list(
+  DEV_gs = developmental_genes,
+  IR_gs = injury_response_genes
+)
+# head(combined_signatures)
+
+class(injury_response_genes)
+str(injury_response_genes)
+
+expr_matrix <- as.matrix(GSC_culture_expression)
+mode(expr_matrix)
+
+param <- gsvaParam(expr_matrix, combined_signatures)
+gsva_results <- gsva(param)
+
+write.csv(gsva_results, "C:/research/20250809_cellline_gsva_results.csv", row.names = TRUE)
+```
+
+Make PCA plot
+
+```{r}
+# Transpose the flux matrix
+GSC_flux_t <- t(GSC_flux)
+```
+
+Resolved error from running prcomp
+
+```{r}
+# Got an error: cannot rescale a constant/zero column to unit variance
+# To resolve, identify columns that are entirely zero
+all_zero_reactions <- names(which(colSums(GSC_flux_t) == 0))
+all_zero_reactions
+length(all_zero_reactions)
+
+# Print column given reaction name
+# Example: reaction of interest
+reaction_name <- "HMR_0024"
+
+# Extract the column
+reaction_flux <- GSC_flux_t[, reaction_name]
+
+# Print it
+print(reaction_flux)
+```
+
+```{r}
+# Remove columns that are all zero
+GSC_flux_t_nonzero <- GSC_flux_t[, colSums(GSC_flux_t) != 0]
+
+# Check dimensions before and after
+dim(GSC_flux_t)
+dim(GSC_flux_t_nonzero)
+
+# Create a PCA plot
+pca <- prcomp(GSC_flux_t_nonzero, scale. = TRUE)  
+```
+
+Make metadata table based on GSVA results and reformat for PCA coloring
+
+```{r}
+gsva_results_t <- t(gsva_results)
+gsva_results_t <- as.data.frame(gsva_results_t)
+
+gsva_results_t$subtype <- ifelse(gsva_results_t$DEV_gs > gsva_results_t$IR_gs, "developmental", "injury_response")
+```
+
+```{r}
+library(ggplot2)
+
+# Convert to a data frame for ggplot
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2]
+)
+
+merged_df <- merge(pca_df, gsva_results_t, by = "row.names", all.x = TRUE)
+
+ggplot(merged_df, aes(x = PC1, y = PC2, color = subtype)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "PCA of MetaFlux Data",
+       x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100,1), "%)"),
+       y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100,1), "%)"))
+
+```
+
+```{r}
+gsva_results_t[,gsva_results_t$subtype]
+
+# See which ones match
+rownames(pca_df) %in% rownames(gsva_results_t)
+
+```
+
+```{r}
+head(rownames(pca_df))
+head(rownames(gsva_results_t))
+```
