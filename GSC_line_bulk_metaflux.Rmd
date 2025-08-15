@@ -1,13 +1,10 @@
-Update to the newest version of R and install METAFlux
-```{r, eval=FALSE}
-install.packages("installr")
-library(installr)
-updateR()
+R version used: 4.5.1
 
-devtools::install_github('KChen-lab/METAFlux')
-```
-
+## Prepare data for Analysis
+Import gene expression data and convert to a dataframe
 ```{r}
+# To install METAFlux
+# devtools::install_github('KChen-lab/METAFlux')
 library(METAFlux)
 library(readxl)
 
@@ -19,36 +16,35 @@ GSC_culture_expression <- as.data.frame(GSC_culture_expression)
 rownames(GSC_culture_expression) <- GSC_culture_expression[[1]]
 GSC_culture_expression[[1]] <- NULL
 
-View(GSC_culture_expression)
+head(GSC_culture_expression)
 ```
 
+## Calculate Flux 
 Calculate the MRAS (Metabolic Reaction Activity Score)
-
 ```{r}
 # METAFlux only accepts positive values, replace negative values with a small positive number 
 # Get positions (row/column) of non-positive values
-which(GSC_culture_expression <= 0, arr.ind = TRUE)
+# which(GSC_culture_expression <= 0, arr.ind = TRUE)
 GSC_culture_expression[GSC_culture_expression < 0] <- 1e-5
 
-GSC_scores<-calculate_reaction_score(GSC_culture_expression)
+GSC_scores <- calculate_reaction_score(GSC_culture_expression)
 ```
 
 Calculate flux
-
 ```{r}
 #Calculate flux for cell line data
-GSC_flux<-compute_flux(mras=GSC_scores,medium = cell_medium) 
+GSC_flux <- compute_flux(mras=GSC_scores,medium = cell_medium) 
 ```
 
+## Assign Subtype Labels to GSC Lines
 Using GSVA, identify which cell lines are developmental and which are IR
-
 ```{r}
 library(GSVA)
-
+# Import gene signatures for developmental and injury response subtypes
 signatures <- read_excel("C:/research/43018_2020_154_MOESM9_ESM (8).xlsx")
 signatures_df <- as.data.frame(signatures)
 
-head(signatures_df, n = 10)
+# head(signatures_df, n = 10)
 
 # Filter genes in the Developmental group
 developmental_genes <- signatures_df$Gene[signatures_df$Group == "Developmental"]
@@ -63,19 +59,30 @@ combined_signatures <- list(
 )
 # head(combined_signatures)
 
-class(injury_response_genes)
-str(injury_response_genes)
+# class(injury_response_genes)
+# str(injury_response_genes)
 
 expr_matrix <- as.matrix(GSC_culture_expression)
-mode(expr_matrix)
+# mode(expr_matrix)
 
 param <- gsvaParam(expr_matrix, combined_signatures)
 gsva_results <- gsva(param)
 
-write.csv(gsva_results, "C:/research/20250809_cellline_gsva_results.csv", row.names = TRUE)
+# write.csv(gsva_results, "C:/research/20250809_cellline_gsva_results.csv", row.names = TRUE)
 ```
 
-Make PCA plot
+Make metadata table based on GSVA results and reformat for PCA coloring
+Looking at the GSVA scores, if dev > IR --> dev, else if dev < IR --> IR
+```{r}
+gsva_results_t <- t(gsva_results)
+gsva_results_t <- as.data.frame(gsva_results_t)
+
+gsva_results_t$subtype <- ifelse(gsva_results_t$DEV_gs > gsva_results_t$IR_gs, "developmental", "injury_response")
+```
+
+## Make PCA plot
+Question: Do the samples cluster together based on developmental/injury response subtype
+Observation: It seems like they generally do quite well. This is as expected given that the flux values are calculated based on gene expression data
 
 ```{r}
 # Transpose the flux matrix
@@ -83,12 +90,10 @@ GSC_flux_t <- t(GSC_flux)
 ```
 
 Resolved error from running prcomp
-
 ```{r}
 # Got an error: cannot rescale a constant/zero column to unit variance
 # To resolve, identify columns that are entirely zero
 all_zero_reactions <- names(which(colSums(GSC_flux_t) == 0))
-all_zero_reactions
 length(all_zero_reactions)
 
 # Print column given reaction name
@@ -114,15 +119,7 @@ dim(GSC_flux_t_nonzero)
 pca <- prcomp(GSC_flux_t_nonzero, scale. = TRUE)  
 ```
 
-Make metadata table based on GSVA results and reformat for PCA coloring
-
-```{r}
-gsva_results_t <- t(gsva_results)
-gsva_results_t <- as.data.frame(gsva_results_t)
-
-gsva_results_t$subtype <- ifelse(gsva_results_t$DEV_gs > gsva_results_t$IR_gs, "developmental", "injury_response")
-```
-
+Making the plot
 ```{r}
 library(ggplot2)
 
@@ -143,16 +140,216 @@ ggplot(merged_df, aes(x = PC1, y = PC2, color = subtype)) +
        y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100,1), "%)"))
 
 ```
-
+## Make Boxplots 
+To compare fluxes between developmental and IR subtypes for specific reactions
 ```{r}
-gsva_results_t[,gsva_results_t$subtype]
+# Load the genome-scale metabolic model
+data("human_gem")
+data("nutrient_lookup_files")
 
-# See which ones match
-rownames(pca_df) %in% rownames(gsva_results_t)
+# Identify reactions with tryptophan in the equation
+# trp_matches <- grepl("tryptophan", human_gem$EQUATION, ignore.case = TRUE)
+# trp_gem <- human_gem[trp_matches, ]
+```
 
+For a single reaction
+```{r}
+# Compare tryptophan import, reaction ID: HMR_5317
+HMR_5317 <- GSC_flux_t[, "HMR_5317"]
+trp_import <- merge(as.data.frame(HMR_5317), gsva_results_t, by = "row.names")
+
+# Count number of samples in each group
+table(trp_import$subtype)
+
+ggplot(trp_import, aes(x = subtype, y = HMR_5317, fill = subtype)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Flux Distribution of HMR_5317 by Subtype",
+    x = "Subtype",
+    y = "Flux (HMR_5317)"
+  ) +
+  theme(legend.position = "none")  # remove legend if fill duplicates x-axis
+
+t.test(HMR_5317 ~ subtype, data = trp_import)
+```
+
+Function that plots given reaction ID
+```{r}
+# Function that makes boxplots for the flux given the reaction ID
+make_boxplots_for_reaction <- function(reaction_name){
+  reaction_df <- GSC_flux_t[, reaction_name]
+  merged_reaction_df <- merge(as.data.frame(reaction_df), gsva_results_t, by = "row.names")
+
+  boxplot <- ggplot(merged_reaction_df, aes(x = subtype, y = reaction_df, fill = subtype)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Flux Distribution of HMR_5317 by Subtype",
+    x = "Subtype",
+    y = paste("Flux", reaction_name)
+  ) +
+  theme(legend.position = "none")  # remove legend if fill duplicates x-axis
+  print(boxplot)
+  
+  ttest_result <- t.test(reaction_df ~ subtype, data = merged_reaction_df)
+  print(ttest_result)
+}
+
+make_boxplots_for_reaction("HMR_5651")
+
+```
+## Make Volcano Plot
+Calculate mean flux difference and p-value across all reactions
+FDR calculated as well
+```{r}
+# Convert flux matrix to dataframe
+GSC_flux_t_nonzero_df <- as.data.frame(GSC_flux_t_nonzero)
+
+# Merge gsva labels GSC flux dataframe
+merged_df_with_labels <- merge(gsva_results_t, GSC_flux_t_nonzero_df, by = "row.names")
+
+rownames(merged_df_with_labels) <- merged_df_with_labels$Row.names
+merged_df_with_labels <- merged_df_with_labels[, -c(1, 2, 3)]
 ```
 
 ```{r}
-head(rownames(pca_df))
-head(rownames(gsva_results_t))
+# Loop over all reaction columns except subtype
+results <- sapply(
+  names(merged_df_with_labels)[!names(merged_df_with_labels) %in% "subtype"],
+  function(reaction) {
+    t.test(merged_df_with_labels[[reaction]] ~ merged_df_with_labels$subtype)$p.value
+  }
+)
+
+# Make into dataframe
+results_df <- data.frame(
+  Reaction = names(results),
+  P_value = results
+)
+
+# Adjust p-values
+results_df$adj_P_value <- p.adjust(results_df$P_value, method = "fdr")
+
+# Sort by smallest p-value
+results_df <- results_df[order(results_df$P_value), ]
+head(results_df)
 ```
+
+```{r}
+# Calculate mean difference (Developmental - IR) for each reaction
+mean_diff <- sapply(
+  names(merged_df_with_labels)[!names(merged_df_with_labels) %in% "subtype"],
+  function(reaction) {
+    mean(merged_df_with_labels[merged_df_with_labels$subtype == "developmental", reaction], na.rm = TRUE) -
+    mean(merged_df_with_labels[merged_df_with_labels$subtype == "injury_response", reaction], na.rm = TRUE)
+  }
+)
+
+results_df$mean_diff <- mean_diff
+```
+
+```{r}
+# Make a separate df containing only significant results
+significant_df <- results_df[results_df$adj_P_value < 0.01, ]
+
+# Merge significant hits with human_gem to easily identify reactions
+significant_df <- merge(significant_df, human_gem, by.x = "Reaction", by.y = "ID")
+```
+
+Making the volcano plot
+```{r}
+ggplot(results_df, aes(x = mean_diff, y = -log10(P_value))) +
+  geom_point(aes(color = adj_P_value < 0.05)) +  # Color significant points
+  scale_color_manual(values = c("grey", "red")) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot of Reaction Flux Differences",
+    x = "Mean Difference (Dev - IR)",
+    y = "-log10(p-value)",
+    color = "Significant (FDR < 0.05)"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed") +  # Reference line
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed")  # p=0.05 threshold
+  coord_cartesian(xlim = c(-0.001, 0.001))  # Zoom into range
+
+```
+
+Volcano plot with top hits labeled
+```{r}
+library(ggrepel)
+
+# Assume results_df has rownames = reaction names
+results_df$Reaction <- rownames(results_df)
+
+ggplot(results_df, aes(x = mean_diff, y = -log10(P_value))) +
+  geom_point(aes(color = adj_P_value < 0.05)) +
+  scale_color_manual(values = c("grey", "red")) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot of Reaction Flux Differences",
+    x = "Mean Difference (Dev - IR)",
+    y = "-log10(p-value)",
+    color = "Significant (FDR < 0.05)"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  coord_cartesian(xlim = c(-0.0005, 0.0005)) +
+  geom_text_repel(aes(label = Reaction),
+                  data = subset(results_df, adj_P_value < 0.05))  # only label significant points
+
+```
+
+## Make Pie Charts
+Made a pie chart using the dataframe containing only significant hits, summarized the most frequently appearing top 5 subsystem labels in a pie chart. Compared this to a pie chart made similarly with all of the reactions in the human1 GEM model. 
+Perhaps most striking is the increased percentage of reactions related to peptide metabolism. It represents only 1.8% of the entire set of reactions but 19.1% of the reactions with differential flux between developmental and IR subtypes
+```{r}
+# Count reactions per subsystem
+pie_counts <- table(human_gem$SUBSYSTEM)
+
+# Sort descending
+pie_counts <- sort(pie_counts, decreasing = TRUE)
+
+# print(pie_counts)
+print(pie_counts["Peptide metabolism"]/sum(pie_counts))
+
+# Keep top 5, sum the rest as "Other"
+top_n <- 5
+if(length(pie_counts) > top_n){
+  top_counts <- pie_counts[1:top_n]
+  other_count <- sum(pie_counts[(top_n + 1):length(pie_counts)])
+  pie_counts <- c(top_counts, Other = other_count)
+}
+
+# Calculate percentages
+labels <- paste(names(pie_counts), round(100 * pie_counts / sum(pie_counts), 1), "%")
+
+# Create pie chart
+pie(pie_counts, labels = labels, main = "Top 5 Subsystems (Others grouped)", col = rainbow(length(pie_counts)))
+```
+```{r}
+# Count reactions per subsystem
+pie_counts_sig <- table(significant_df$SUBSYSTEM)
+
+# Sort descending
+pie_counts_sig <- sort(pie_counts_sig, decreasing = TRUE)
+
+# Keep top 5, sum the rest as "Other"
+top_n_sig <- 5
+if(length(pie_counts_sig) > top_n_sig){
+  top_counts <- pie_counts_sig[1:top_n_sig]
+  other_count <- sum(pie_counts_sig[(top_n_sig + 1):length(pie_counts_sig)])
+  pie_counts_sig <- c(top_counts, Other = other_count)
+}
+
+# Calculate percentages
+labels <- paste(names(pie_counts_sig), round(100 * pie_counts_sig / sum(pie_counts_sig), 1), "%")
+
+# Create pie chart
+pie(pie_counts_sig, labels = labels, main = "Top 5 Subsystems (Others grouped)", col = rainbow(length(pie_counts_sig)))
+
+```
+
+
+
+
