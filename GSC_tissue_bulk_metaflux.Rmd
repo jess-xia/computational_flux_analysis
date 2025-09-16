@@ -11,7 +11,7 @@ library(readxl)
 
 ```{r}
 # Returns a tibble, does not support row names
-GSC_culture_expression <- read_excel("C:/research/GBM_cultures_only_gene_expression_matrix.xlsx")
+GSC_culture_expression <- read_excel("C:/research/GBM_tissue_only_gene_expression_matrix.xlsx")
 
 # Convert to dataframe and set the first column as rownames
 GSC_culture_expression <- as.data.frame(GSC_culture_expression)
@@ -40,12 +40,12 @@ GSC_flux <- compute_flux(mras=GSC_scores,medium = cell_medium)
 ```
 ```{r}
 # Save the flux results
-write.csv(GSC_flux, "C:/research/computational_flux_analysis/GSC_line_bulk_METAFlux_flux_results.csv", row.names = TRUE)
+write.csv(GSC_flux, "C:/research/computational_flux_analysis/GSC_tissue_bulk_METAFlux_flux_results.csv", row.names = TRUE)
 ```
 
 ```{r}
 # Read in the flux results if previously saved
-GSC_flux <- read.csv("C:/research/computational_flux_analysis/GSC_line_bulk_METAFlux_flux_results.csv",
+GSC_flux <- read.csv("C:/research/computational_flux_analysis/GSC_tissue_bulk_METAFlux_flux_results.csv",
                      row.names = 1)
 head(GSC_flux)
 ```
@@ -205,9 +205,7 @@ reaction_cols <- setdiff(names(merged_df_with_labels), "subtype")
 
 # --- 2. Function to calculate p-value for a single reaction ---
 calc_pvalue <- function(reaction) {
-  # t.test(merged_df_with_labels[[reaction]] ~ merged_df_with_labels$subtype)$p.value
   wilcox.test(merged_df_with_labels[[reaction]] ~ merged_df_with_labels$subtype)$p.value
-
 }
 
 # --- 3. Apply function to all reactions ---
@@ -225,6 +223,10 @@ results_df <- results_df[-c(1,2,3), ]
 
 ```
 
+```{r}
+print(merged_df_with_labels[1:5, 1:5])
+```
+
 Calculate mean flux values for each subtype, then calculate mean difference and log2FC
 ```{r}
 # --- 1. Split data by subtype ---
@@ -236,6 +238,7 @@ ir_flux <- ir_flux[,5:ncol(ir_flux)]
 dev_means <- colMeans(dev_flux, na.rm = TRUE)
 ir_means  <- colMeans(ir_flux, na.rm = TRUE)
 ```
+
 ```{r}
 results_means <- data.frame(
   dev_mean  = dev_means,
@@ -292,7 +295,7 @@ results_df <- merge(results_df, human_gem[, c("ID", "SUBSYSTEM", "EQUATION", "GE
 
 
 ```{r}
-write.csv(results_df, file = "GSC_line_bulk_METAFlux_full_results.csv", row.names = TRUE)
+write.csv(results_df, file = "GSC_tissue_bulk_METAFlux_full_results.csv", row.names = TRUE)
 ```
 
 
