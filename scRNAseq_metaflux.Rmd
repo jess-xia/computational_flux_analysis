@@ -1,0 +1,236 @@
+---
+title: "scRNAseq_METAFlux_analysis"
+output: html_document
+date: "2025-09-09"
+---
+
+---
+title: "scRNAseq_METAFlux_analysis"
+output: html_document
+date: "2025-09-16"
+---
+
+```{r setup}
+# Load required libraries
+library(Seurat)
+library(dplyr)
+library(METAFlux)
+library(pheatmap)
+
+```
+
+#### View Data from Tutorial
+```{r}
+# Load example data from METAFlux package
+data("sc_test_example")
+sc_test_example
+# An object of class Seurat 
+# 29634 features across 397 samples within 1 assay --> 29634 genes and 397 cells
+# Active assay: RNA (29634 features, 0 variable features)
+#  2 layers present: counts, data --> raw counts and normalized data
+
+# Active assay is "RNA" by default
+# Access raw counts
+counts_matrix <- GetAssayData(sc_test_example, slot = "counts")
+counts_matrix[1:5, 1:5]  # first 5 genes x 5 cells
+
+# Access normalized/log-transformed data
+data_matrix <- GetAssayData(sc_test_example, slot = "data")
+data_matrix[1:5, 1:5]
+
+# Access metadata
+head(sc_test_example@meta.data)
+```
+
+The code below is exactly as written in the METAFlux tutorial but it is giving me an error when I run it
+I think this may likely be due to differences in the Seurat version
+I am currently using version 5.3.0
+The tutorial was published on 10/25/2022, and likely built against Seurat v4
+Below, I will install a Seurat v4 version from late 2022 and see if that resolves the issue --> seems to be working!
+```{r}
+# Remove current version first
+remove.packages("Seurat")
+
+# Install specific older version
+install.packages("remotes") # if not installed
+library(remotes)
+install_version("Seurat", version = "4.3.0", repos = "http://cran.us.r-project.org")
+
+# Verify
+packageVersion("Seurat")
+```
+
+
+```{r}
+table(sc_test_example$Cell_type)
+
+mean_exp=calculate_avg_exp(myseurat = sc_test_example,myident = 'Cell_type',n_bootstrap=3,seed=1)
+```
+
+
+#### Load Data and Preprocess
+```{r}
+# Read in count matrix (genes as rows, cells as columns)
+counts <- read.csv("D:/Users/Jessica/METAFlux/Richards_NatureCancer_GBM_scRNAseq_counts.csv",
+                   row.names = 1)
+counts[1:5, 1:5]  # view first 5 genes × 5 cells
+
+# Check the dimensions of the count matrix
+dim(counts)
+# [1] 17647 44712
+# There are 17,647 genes and 44,712 cells in the dataset
+```
+
+```{r}
+# Read in metadata, merge metadata with refined cell type labels
+refined_celltype_labels <- read.csv(
+  "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/refined_celltype_labels.csv",
+  row.names = 1)
+# head(refined_celltype_labels)
+
+metadata <- read.csv("D:/Users/Jessica/METAFlux/Richards_NatureCancer_GBM_scRNAseq_meta.csv",
+                     row.names = 1,
+                     stringsAsFactors = FALSE)
+# head(metadata)
+
+# Merge with refined cell type labels (both have rownames = cell IDs)
+merged_meta <- cbind(metadata, refined_celltype_labels[rownames(metadata), , drop = FALSE])
+dim(merged_meta)
+# [1] 44712    31
+head(merged_meta)
+```
+
+The cell numbers match up between counts and metadata but the cell names do not
+For the counts data it looks like this: G1003.A_T_AAACCTGAGTATCGAA whereas for the metadata it looks like this: G1003-A_T_AAACCTGAGTATCGAA
+```{r}
+# Fix cell name discrepancies
+# Replace hyphens with dots in merged_meta rownames
+rownames(merged_meta) <- gsub("-", ".", rownames(merged_meta))
+
+# Check if cell names now match
+matches <- colnames(counts) == rownames(merged_meta)
+all(matches) 
+# [1] TRUE
+```
+
+
+```{r}
+# Create Seurat object with raw counts
+sc_obj <- CreateSeuratObject(counts = counts)
+
+# Normalize the data
+sc_obj <- NormalizeData(sc_obj)
+
+# Add metadata to Seurat object
+sc_obj@meta.data <- merged_meta
+
+# Check the object
+sc_obj
+
+```
+
+
+#### Run METAFlux Analysis
+I am getting these warning messages when running the code below
+Warning messages:
+1: Removing 43808 cells missing data for vars requested
+2: Removing 43788 cells missing data for vars requested
+3: Removing 43747 cells missing data for vars requested
+
+I discovered that my cell names dont match up. 
+For the counts data it looks like this: G1003.A_T_AAACCTGAGTATCGAA whereas for the metadata it looks like this: G1003-A_T_AAACCTGAGTATCGAA
+Added a code chunck after importing metadata to match up cell names
+This fixed the issue!
+```{r}
+mean_exp <- calculate_avg_exp(myseurat = sc_obj, myident = 'RefinedCellType', n_bootstrap=100,seed=1)
+head(mean_exp)
+```
+
+```{r}
+# Calculate metabolic reaction scores
+scores <- calculate_reaction_score(data = mean_exp)
+head(scores,4)
+```
+
+```{r}
+# Calculate the fractions of celltype/clusters
+round(table(merged_meta$RefinedCellType) / nrow(merged_meta), 4)
+```
+
+```{r}
+flux <- compute_sc_flux(num_cell = 6,fraction = c(0.4595, 0.0614, 0.0820, 0.0236, 0.2209, 0.1526),
+  fluxscore = scores,
+  medium = human_blood)
+
+# Rename the flux value column for clarity
+# flux <- flux %>% rename(flux_value = V1)
+
+# Check dimensions of flux results
+dim(flux)
+# [1] 80140     3
+
+```
+
+```{r}
+# Extract cell types from row names in flux results
+flux$cell_type <- ifelse(
+  grepl("^celltype", rownames(flux)),                       # if starts with "celltype"
+  sub("^(celltype \\d+).*", "\\1", rownames(flux)),         # keep "celltype X"
+  sub("^(\\S+).*", "\\1", rownames(flux))                   # else, keep everything before first space
+)
+
+# Extract the flux reaction name and store in separate column
+flux$reaction <- sapply(strsplit(rownames(flux), " "), tail, 1)
+
+# Check unique cell types
+unique(flux$cell_type)
+
+head(flux)
+```
+
+Map cell types to more descriptive names
+```{r}
+flux$cell_type <- recode(flux$cell_type,
+  "celltype 1" = "Macrophage",
+  "celltype 2" = "Microglia",
+  "celltype 3" = "Oligodendrocyte",
+  "celltype 4" = "T-cell",
+  "celltype 5" = "Tumor",
+  "celltype 6" = "Unknown"
+)
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Example: df is your dataframe
+# Choose the reaction you want to plot
+reaction_to_plot <- "HMR_3905"
+
+# Filter the reaction of interest
+df_sub <- flux %>% filter(reaction == reaction_to_plot)
+
+# Convert from wide to long format
+df_long <- df_sub %>%
+  pivot_longer(
+    cols = starts_with("V"),   # V1, V2, V3, etc.
+    names_to = "replicate",    # new column storing V1, V2, V3
+    values_to = "flux_value"   # flux values
+  )
+
+# Make boxplot
+ggplot(df_long, aes(x = cell_type, y = flux_value, fill = cell_type)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(title = paste("Flux values for reaction", reaction_to_plot),
+       x = "Cell type", y = "Flux value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+
