@@ -201,6 +201,14 @@ flux$cell_type <- recode(flux$cell_type,
 
 ```
 
+
+```{r}
+# Save the flux dataframe to a CSV file
+write.csv(flux, "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_flux_results.csv", row.names = TRUE)
+
+```
+
+Make boxplots for each cell type given a reaction
 ```{r}
 library(dplyr)
 library(tidyr)
