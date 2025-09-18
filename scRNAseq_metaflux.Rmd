@@ -127,8 +127,15 @@ sc_obj@meta.data <- merged_meta
 # Check the object
 sc_obj
 
+# Save the Seurat object for future use
+saveRDS(sc_obj, file = "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/sc_obj_with_metadata.rds")
 ```
 
+```{r}
+# Load the Seurat object if needed
+sc_obj <- readRDS("D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/sc_obj_with_metadata.rds")
+sc_obj
+```
 
 #### Run METAFlux Analysis
 I am getting these warning messages when running the code below
@@ -205,7 +212,12 @@ flux$cell_type <- recode(flux$cell_type,
 ```{r}
 # Save the flux dataframe to a CSV file
 write.csv(flux, "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_flux_results.csv", row.names = TRUE)
+```
 
+```{r}
+# Read the flux dataframe from the CSV file
+flux <- read.csv("D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_flux_results.csv", row.names = 1)
+head(flux)
 ```
 
 Make boxplots for each cell type given a reaction
@@ -216,7 +228,8 @@ library(ggplot2)
 
 # Example: df is your dataframe
 # Choose the reaction you want to plot
-reaction_to_plot <- "HMR_3905"
+# "HMR_3905"
+reaction_to_plot <- "HMR_5512"
 
 # Filter the reaction of interest
 df_sub <- flux %>% filter(reaction == reaction_to_plot)
@@ -241,4 +254,234 @@ ggplot(df_long, aes(x = cell_type, y = flux_value, fill = cell_type)) +
 ```
 
 
+#### Significance Testing
+The majority of reactions have very significant p-values, as low as e-122.
+This is likely due to high variation between cells and the result of having many cell types which further introduces variability
+```{r}
+library(dplyr)
 
+df_long_full <- flux %>%
+  pivot_longer(
+    cols = starts_with("V"),   # V1, V2, V3, etc.
+    names_to = "replicate",    # new column storing V1, V2, V3
+    values_to = "flux_value"   # flux values
+  )
+
+dim(df_long_full)
+# [1] 8014000       4
+
+results <- df_long_full %>%
+  group_by(reaction) %>%
+  summarise(
+    p_value = kruskal.test(flux_value ~ cell_type)$p.value
+  ) %>%
+  mutate(fdr_p = p.adjust(p_value, method = "fdr"))
+
+# View results
+print(results)
+
+```
+
+Annotate significant results by merging with reaction annotations from the human GEM
+```{r}
+data("human_gem")
+annotated_results <- results %>%
+  left_join(human_gem[, c("ID", "EQUATION", "GENE ASSOCIATION", "SUBSYSTEM")],
+            by = c("reaction" = "ID"))
+```
+
+Filter and annotate significant results
+Looking at the top 439 significant results, they were all exchange/demand reactions with no gene associations
+Exchange/demand reactions don't directly depend on gene expression, they help to balance out the flux model
+```{r}
+fdr_cutoff <- 1e-130
+sum(annotated_results$fdr_p < fdr_cutoff, na.rm = TRUE)
+
+# Merge significant results with reaction annotations
+sig_results <- annotated_results %>% filter(fdr_p < fdr_cutoff)
+head(sig_results)
+```
+
+Look at only flux that have a gene association
+```{r}
+fdr_cutoff <- 1e-100
+sig_results_with_genes_association <- annotated_results %>% filter(fdr_p < fdr_cutoff) %>% filter(!is.na(`GENE ASSOCIATION`))
+head(sig_results_with_genes_association)
+```
+
+
+While it is interesting to have so much cell-type specificity, I am primarily interested in macrophages and tumour cells.
+These are also the two cell types that make up the majority of the cells in the dataset.
+In the original dataset, macrophages, tumour cells, and unknown cells make up 46%, 22%, and 15% of the cells, respectively.
+The combined proportion of tumour and unknown cells will be much closer to that of macrophages.
+
+In the publication, "unknown" and "tumour" labels together match to "malignant" cells
+I will now compare macrophages to tumour cells only (combining unknown and tumour labels)
+I expect the p-values to be a lot higher, meaning there will be fewer hits
+
+If I combine unknown and tumour into a single tumor category after calculating flux, I get duplicate values for each cell type flux reaction primarily
+Therefore, I will combine the two and then recalculate flux
+```{r}
+# For the RefinedCellType column in sc_obj@meta.data, convert "Unknown" to "Tumor"
+sc_obj@meta.data$RefinedCellType <- ifelse(sc_obj@meta.data$RefinedCellType == "Unknown", "Tumor", sc_obj@meta.data$RefinedCellType)
+# Check the updated cell type counts
+table(sc_obj@meta.data$RefinedCellType)
+
+# Calculate mean expression again with updated cell types
+mean_exp <- calculate_avg_exp(myseurat = sc_obj, myident = 'RefinedCellType', n_bootstrap=100,seed=1)
+head(mean_exp)
+```
+
+```{r}
+# Calculate metabolic reaction scores
+scores <- calculate_reaction_score(data = mean_exp)
+head(scores,4)
+```
+
+```{r}
+# Calculate the fractions of celltype/clusters
+round(table(sc_obj@meta.data$RefinedCellType) / nrow(sc_obj@meta.data), 4)
+```
+
+```{r}
+flux <- compute_sc_flux(num_cell = 5,fraction = c(0.4595, 0.0614, 0.0820, 0.0236, 0.3735),
+  fluxscore = scores,
+  medium = human_blood)
+
+# Rename the flux value column for clarity
+# flux <- flux %>% rename(flux_value = V1)
+
+# Check dimensions of flux results
+dim(flux)
+# [1] 67058   100
+
+```
+
+```{r}
+# Extract cell types from row names in flux results
+flux$cell_type <- ifelse(
+  grepl("^celltype", rownames(flux)),                       # if starts with "celltype"
+  sub("^(celltype \\d+).*", "\\1", rownames(flux)),         # keep "celltype X"
+  sub("^(\\S+).*", "\\1", rownames(flux))                   # else, keep everything before first space
+)
+
+# Extract the flux reaction name and store in separate column
+flux$reaction <- sapply(strsplit(rownames(flux), " "), tail, 1)
+
+# Check unique cell types
+unique(flux$cell_type)
+
+head(flux)
+```
+
+Map cell types to more descriptive names
+```{r}
+flux$cell_type <- recode(flux$cell_type,
+  "celltype 1" = "Macrophage",
+  "celltype 2" = "Microglia",
+  "celltype 3" = "Oligodendrocyte",
+  "celltype 4" = "T-cell",
+  "celltype 5" = "Tumor",
+)
+
+```
+
+```{r}
+# Save the flux dataframe to a CSV file
+write.csv(flux, "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_flux_results_unknown_tumor_combined.csv", row.names = TRUE)
+```
+
+
+
+Filter and annotate flux results
+```{r}
+# Filter flux dataframe for only rows were cell_type is Macrophage or Tumor
+flux_filtered <- flux %>% filter(cell_type %in% c("Macrophage", "Tumor"))
+head(flux_filtered)
+dim(flux_filtered)
+# [1] 26824    100
+
+```
+
+```{r}
+library(dplyr)
+
+df_long_full <- flux %>%
+  pivot_longer(
+    cols = starts_with("V"),   # V1, V2, V3, etc.
+    names_to = "replicate",    # new column storing V1, V2, V3
+    values_to = "flux_value"   # flux values
+  )
+
+dim(df_long_full)
+# [1] 6705800       4
+
+# Perform significance testing between Macrophage and Tumor cell types
+results <- df_long_full %>%
+  filter(cell_type %in% c("Macrophage", "Tumor")) %>%
+  group_by(reaction) %>%
+  summarise(
+    p_value = wilcox.test(flux_value ~ cell_type)$p.value
+  ) %>%
+  mutate(fdr_p = p.adjust(p_value, method = "fdr"))
+
+# View results
+head(results)
+```
+
+Annotate results
+```{r}
+data("human_gem")
+annotated_results <- results %>%
+  left_join(human_gem[, c("ID", "EQUATION", "GENE ASSOCIATION", "SUBSYSTEM")],
+            by = c("reaction" = "ID"))
+```
+
+Look at only flux that have a gene association
+```{r}
+fdr_cutoff <- 1e-10
+sig_results_with_genes_association <- annotated_results %>% filter(fdr_p < fdr_cutoff) %>% filter(!is.na(`GENE ASSOCIATION`))
+head(sig_results_with_genes_association)
+dim(sig_results_with_genes_association)
+# [1] 2898    6
+```
+
+```{r}
+# Make boxplot for a specific reaction
+reaction_to_plot <- "HMR_4931"
+# 
+# HMR_5332
+# HMR_5330
+# HMR_4931
+
+# View the full output
+# options(tibble.print_max = Inf, tibble.width = Inf)
+
+# Print row of sig_results_with_genes_association for the reaction of interest
+print(sig_results_with_genes_association %>% filter(reaction == reaction_to_plot))
+
+df_long_subset <- df_long_full %>%
+  filter(cell_type %in% c("Macrophage", "Tumor")) %>%
+  filter(reaction == reaction_to_plot)
+
+# Make boxplot
+ggplot(df_long_subset, aes(x = cell_type, y = flux_value, fill = cell_type)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(title = paste("Flux values for reaction", reaction_to_plot),
+       x = "Cell type", y = "Flux value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+Search for glutamate related reactions
+```{r}
+# For the table sig_results_with_genes_association, filter for reactions with "glutamate" in the EQUATION column
+glutamate_reactions <- sig_results_with_genes_association %>%
+  filter(grepl("glutamate", EQUATION, ignore.case = TRUE))
+head(glutamate_reactions)
+dim(glutamate_reactions)
+
+```
