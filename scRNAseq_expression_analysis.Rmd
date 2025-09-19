@@ -1,5 +1,11 @@
 #### Load and preprocess the Seurat object
 ```{r}
+library(Seurat)
+library(DESeq2)
+```
+
+
+```{r}
 # Load the Seurat object created in scRNAseq_metaflux.Rmd
 sc_obj <- readRDS("D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/sc_obj_with_metadata.rds")
 sc_obj
@@ -211,23 +217,33 @@ Gene set enrichment analysis
 ```{r}
 library(clusterProfiler)
 library(org.Hs.eg.db)
-# Prepare gene list for GSEA
+library(msigdbr)
+
+# Get Hallmark gene sets
+msigdb_hallmark <- msigdbr(species = "Homo sapiens", category = "H")  # "H" = Hallmark
+head(msigdb_hallmark)
+
+# Prepare named, sorted gene list for GSEA
 gene_list <- volcano_data$log2FoldChange
 names(gene_list) <- rownames(volcano_data)
 gene_list <- sort(gene_list, decreasing = TRUE)
-# Run GSEA using Hallmark gene sets from MSigDB
-gsea_results <- gseMSigDB(geneList = gene_list,
-                           organism = "human",
-                            msigdb = "HALLMARK",
-                            pvalueCutoff = 0.05,
-                            verbose = FALSE)
+
+# Run GSEA
+gsea_results <- GSEA(geneList = gene_list,
+                     TERM2GENE = msigdb_hallmark[, c("gs_name", "gene_symbol")],
+                     pvalueCutoff = 0.05,
+                     verbose = FALSE)
+
 # View top enriched pathways
 head(gsea_results@result)
-# Save GSEA results to a CSV file
-write.csv(gsea_results@result, "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_gsea_results_macrophage_vs_tumor.csv", row.names = FALSE)
+
+# Save results to CSV
+write.csv(gsea_results@result,
+          "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_gsea_results_macrophage_vs_tumor.csv",
+          row.names = FALSE)
+
+
 ```
-
-
 
 Clustering with pca
 ```{r}
