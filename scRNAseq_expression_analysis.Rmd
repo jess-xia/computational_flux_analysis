@@ -1,0 +1,253 @@
+#### Load and preprocess the Seurat object
+```{r}
+# Load the Seurat object created in scRNAseq_metaflux.Rmd
+sc_obj <- readRDS("D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/sc_obj_with_metadata.rds")
+sc_obj
+```
+
+Change cell type labels
+```{r}
+# For the RefinedCellType column in sc_obj@meta.data, convert "Unknown" to "Tumor"
+sc_obj@meta.data$RefinedCellType <- ifelse(sc_obj@meta.data$RefinedCellType == "Unknown", "Tumor", sc_obj@meta.data$RefinedCellType)
+# Check the updated cell type counts
+table(sc_obj@meta.data$RefinedCellType)
+```
+
+Inspect metadata
+```{r}
+head(sc_obj@meta.data)
+
+# Check the distribution of cell types across patients
+# There are a total of 7 patients, all have both macrophage and tumor cells
+# The number of microglia is very approximately 1/10 of the number of macrophages
+table(sc_obj@meta.data$PatientID, sc_obj@meta.data$RefinedCellType)
+```
+
+```{r}
+# Subset the Seurat object to include only macrophages and tumor cells
+sc_obj_subset <- subset(sc_obj, subset = RefinedCellType %in% c("Macrophage", "Tumor"))
+table(sc_obj_subset@meta.data$PatientID, sc_obj_subset@meta.data$RefinedCellType)
+```
+
+Data was normalized in scRNAseq_metaflux.Rmd
+Default log normalization was used. This adjusts for sequencing depth. 
+1. Counts for each gene in each cell are divided by the total counts for that cell and multiplied by a scale factor (10,000 by default).
+2. The result is then log-transformed using log(x+1)
+```{r}
+sc_obj_subset@assays$RNA@counts[1:5, 1:5]   # Raw integer counts
+sc_obj_subset@assays$RNA@data[1:5, 1:5]     # Normalized data (After running NormalizeData)
+```
+
+Pseudobulk aggregation. Treates all the cells in each patient-cell type pair as one big cell
+Sums the counts for each gene across all the cells in that group
+```{r}
+# Aggregate gene expression for each patient-cell type pair
+pb <- AggregateExpression(
+    object = sc_obj_subset,
+    group.by = c("PatientID", "RefinedCellType"),
+    assays = "RNA",
+    slot = "counts",
+)
+
+pb$RNA[1:5, 1:5]  # Display the first few rows and columns of the aggregated data
+```
+
+Create a metadata dataframe for the pseudobulk samples
+```{r}
+library(stringr)
+
+pb_samples <- colnames(pb$RNA)
+patient <- str_extract(pb_samples, "G[0-9]+")        # extract G1003, G910, etc.
+celltype <- str_extract(pb_samples, "(?<=_).*")      # extract after underscore
+
+# Create metadata table
+pb_meta <- data.frame(
+  Sample = pb_samples,
+  Patient = patient,
+  CellType = celltype
+)
+
+# Make row names = sample names (required by DESeq2)
+rownames(pb_meta) <- pb_meta$Sample
+
+# View
+pb_meta
+```
+
+Create the DESeq2 object
+```{r}
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(
+  countData = pb$RNA,
+  colData = pb_meta,
+  design = ~ Patient + CellType
+)
+
+class(dds)  # Check if dds was created properly
+head(colData(dds)) # Check metadata
+head(counts(dds))  # Check counts
+
+```
+
+Run DESeq2 differential expression analysis
+```{r}
+dds <- DESeq(dds)
+```
+
+Look at results
+Positive fold change means up in Macrophage vs Tumor
+Negative fold change means down in Macrophage vs Tumor
+```{r}
+# Compare Macrophage vs Tumor, adjusting for patient
+DESeq_results <- results(dds, contrast = c("CellType", "Macrophage", "Tumor"))
+
+# View top DE genes
+head(DESeq_results[order(DESeq_results$padj), ])
+```
+
+```{r}
+# Save DESeq2 results to a CSV file
+write.csv(as.data.frame(DESeq_results), "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_deseq2_results_macrophage_vs_tumor.csv", row.names = TRUE)
+
+```
+
+Make a volcano plot
+```{r}
+library(ggplot2)
+library(ggrepel)   # for nicer text labels
+
+volcano_data <- as.data.frame(DESeq_results)
+volcano_data$Gene <- rownames(volcano_data)
+
+# Define significance
+volcano_data$Significant <- ifelse(volcano_data$padj < 0.0001 & 
+                                     abs(volcano_data$log2FoldChange) > 2, 
+                                   "Yes", "No")
+
+# Select top 20 genes based on both padj and absolute fold change
+top_hits <- volcano_data %>%
+  dplyr::filter(!is.na(padj)) %>%
+  dplyr::arrange(padj, -abs(log2FoldChange)) %>%
+  dplyr::slice(1:20)
+
+# Volcano plot
+ggplot(volcano_data, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+  theme_minimal() +
+  labs(title = "Volcano Plot: Macrophage vs Tumor",
+       x = "Log2 Fold Change",
+       y = "-Log10 Adjusted P-value") +
+  theme(legend.position = "top") +
+  ggrepel::geom_text_repel(data = top_hits, 
+                           aes(label = Gene),
+                           size = 3,
+                           max.overlaps = 20,
+                           box.padding = 0.5,
+                           point.padding = 0.2,
+                           segment.color = "black")
+
+```
+
+
+Make boxplots
+```{r}
+norm_counts <- counts(dds, normalized = TRUE)
+
+gene <- "SLC7A11"
+plot_df <- data.frame(
+  Expression = norm_counts[gene, ],
+  CellType   = colData(dds)$CellType,
+  Patient    = colData(dds)$Patient
+)
+
+library(ggplot2)
+
+ggplot(plot_df, aes(x = CellType, y = Expression, fill = CellType)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(aes(color = Patient), width = 0.2, size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(title = paste("Expression of", gene),
+       y = "Normalized counts",
+       x = "Cell Type")
+
+
+```
+
+Make a heatmap of top DE genes
+```{r}
+library(pheatmap)
+library(dplyr)
+top_genes <- volcano_data %>%
+  dplyr::filter(!is.na(padj)) %>%
+  dplyr::arrange(padj) %>%
+  dplyr::slice(1:20) %>%
+  dplyr::pull(Gene)
+
+heatmap_data <- norm_counts[top_genes, ]
+# Scale by row (gene)
+heatmap_data <- t(scale(t(heatmap_data)))
+# Cap values at -2 and 2 for better visualization
+heatmap_data[heatmap_data > 2] <- 2
+heatmap_data[heatmap_data < -2] <- -2
+# Create annotation for columns
+annotation_col <- data.frame(
+  CellType = colData(dds)$CellType,
+  Patient  = colData(dds)$Patient
+)
+rownames(annotation_col) <- colnames(heatmap_data)
+# Plot heatmap
+pheatmap(heatmap_data,
+            annotation_col = annotation_col,
+            cluster_rows = TRUE,
+            cluster_cols = TRUE,
+            show_rownames = TRUE,
+            show_colnames = FALSE,
+            main = "Top 20 DE Genes: Macrophage vs Tumor")
+```
+
+
+Gene set enrichment analysis
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+# Prepare gene list for GSEA
+gene_list <- volcano_data$log2FoldChange
+names(gene_list) <- rownames(volcano_data)
+gene_list <- sort(gene_list, decreasing = TRUE)
+# Run GSEA using Hallmark gene sets from MSigDB
+gsea_results <- gseMSigDB(geneList = gene_list,
+                           organism = "human",
+                            msigdb = "HALLMARK",
+                            pvalueCutoff = 0.05,
+                            verbose = FALSE)
+# View top enriched pathways
+head(gsea_results@result)
+# Save GSEA results to a CSV file
+write.csv(gsea_results@result, "D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_gsea_results_macrophage_vs_tumor.csv", row.names = FALSE)
+```
+
+
+
+Clustering with pca
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(DESeq2)
+vsd <- vst(dds, blind = FALSE)
+pca_data <- plotPCA(vsd, intgroup = c("CellType", "Patient"), returnData = TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+ggplot(pca_data, aes(PC1, PC2, color = CellType, shape = Patient)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_minimal() +
+  labs(title = "PCA of Pseudobulk Samples") +
+  theme(legend.position = "right") +
+  ggrepel::geom_text_repel(aes(label = rownames(pca_data)),
+                           size = 3,
+                           max.overlaps = 20,
+                           box.padding = 0.5,
+                           point.padding = 0.2,
+                           segment.color = "black")
+```
