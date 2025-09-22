@@ -1,0 +1,144 @@
+
+```{r}
+library(pathview)
+library(METAFlux)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(org.Hs.eg.db)
+library(tibble)
+```
+
+Read in flux data 
+```{r}
+# Read in csv flux results from scRNAseq_metaflux.Rmd
+flux <- read.csv("D:/Users/Jessica/METAFlux/computational_flux_analysis/processed/scrnaseq_flux_results_unknown_tumor_combined.csv", row.names = 1)
+
+# Compute mean flux per reaction per cell type, averages bootstrap values
+flux_agg <- flux %>%
+  group_by(cell_type, reaction) %>%
+  summarise(mean_flux = rowMeans(across(starts_with("V")), na.rm = TRUE), .groups = "drop")
+
+head(flux_agg)
+```
+
+Combine flux results with human_gem to map reactions to genes
+```{r}
+data('human_gem')
+human_gem_subset <- subset(human_gem, select = c('ID', 'GENE ASSOCIATION'))
+
+flux_mapped <- flux_agg %>%
+  left_join(human_gem_subset, by = c("reaction" = "ID")) %>%
+  # remove parentheses
+  mutate(`GENE ASSOCIATION` = str_replace_all(`GENE ASSOCIATION`, "[()]", "")) %>%
+  # split on both " or " and " and "
+  mutate(GENE_ASSOCIATION = str_split(`GENE ASSOCIATION`, " or | and ")) %>%
+  unnest(GENE_ASSOCIATION) %>% # Expand list-column into rows
+  mutate(GENE_ASSOCIATION = str_trim(GENE_ASSOCIATION)) # remove extra spaces
+
+head(flux_mapped)
+```
+
+Map ENSG IDs to Entrez IDs
+```{r}
+# Connect to Ensembl BioMart
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Extract unique GENE_ASSOCIATION IDs
+gene_ids <- unique(flux_mapped$GENE_ASSOCIATION[!is.na(flux_mapped$GENE_ASSOCIATION)])
+
+# Map Ensembl IDs to Entrez IDs
+mapped_ids <- getBM(
+  attributes = c("ensembl_gene_id", "entrezgene_id"),
+  filters = "ensembl_gene_id",
+  values = gene_ids,
+  mart = ensembl
+)
+
+# Merge mapped Entrez IDs back to the dataframe
+flux_mapped <- merge(flux_mapped, mapped_ids, by.x = "GENE_ASSOCIATION", by.y = "ensembl_gene_id", all.x = TRUE)
+
+# View the updated dataframe
+head(flux_mapped)
+```
+
+Prepare a named flux vector for Pathview input
+```{r}
+# Subset only macrophage flux data
+mac_flux <- flux_mapped %>% 
+  filter(cell_type == "Macrophage") %>%
+  subset(select = c("mean_flux", "entrezgene_id"))
+
+# Collapse flux values by Entrez ID (take mean here, but you could also use sum, median, max, etc.)
+mac_flux <- mac_flux %>%
+  group_by(entrezgene_id) %>%
+  summarise(mean_flux = mean(mean_flux, na.rm = TRUE), .groups = "drop")
+
+# Convert to named numeric vector for pathview
+mac_flux_vector <- deframe(mac_flux)
+```
+
+
+#### Run pathview
+All the boxes are gray when running pathview directly using mean flux values. 
+This is likely because the flux values are all very close to zero. 
+I will try normalizing and log transforming the flux values before running pathview again.
+```{r}
+pathview(
+  gene.data = mac_flux_vector,
+  pathway.id = "hsa00250",   # example pathway
+  species = "hsa",
+  out.suffix = "Macrophage"
+)
+```
+
+Transform flux values using log 10 transformation, the normalize it to be in the range of -1 to 1
+```{r}
+# Apply signed log10 transformation
+# Transform flux values: log10 scale while keeping the sign
+mac_flux_transformed <- sign(mac_flux_vector) * log10(abs(mac_flux_vector) + 1e-10)
+mac_flux_transformed <- mac_flux_transformed / max(abs(mac_flux_transformed), na.rm = TRUE)
+```
+
+Create a histogram to compare the distribution of flux values before and after transformation
+```{r}
+hist(mac_flux_vector, breaks = 50, main = "Raw Macrophage Flux Values", xlab = "Flux Value", col = "skyblue", border = "white")
+hist(mac_flux_transformed, breaks = 50, main = "Transformed Macrophage Flux Values", xlab = "Transformed Flux Value", col = "salmon", border = "white")
+```
+
+
+```{r}
+pathview(
+  gene.data = mac_flux_transformed,
+  pathway.id = "hsa00380",   # example pathway
+  species = "hsa",
+  out.suffix = "Macrophage"
+)
+
+```
+
+View tumor cell data
+```{r}
+# Subset only macrophage flux data
+tumor_flux <- flux_mapped %>% 
+  filter(cell_type == "Tumor") %>%
+  subset(select = c("mean_flux", "entrezgene_id"))
+
+# Collapse flux values by Entrez ID (take mean here, but you could also use sum, median, max, etc.)
+tumor_flux <- tumor_flux %>%
+  group_by(entrezgene_id) %>%
+  summarise(mean_flux = mean(mean_flux, na.rm = TRUE), .groups = "drop")
+
+# Convert to named numeric vector for pathview
+tumor_flux_vector <- deframe(tumor_flux)
+
+tumor_flux_transformed <- sign(tumor_flux_vector) * log10(abs(tumor_flux_vector) + 1e-10)
+tumor_flux_transformed <- tumor_flux_transformed / max(abs(tumor_flux_transformed), na.rm = TRUE)
+
+pathview(
+  gene.data = tumor_flux_transformed,
+  pathway.id = "hsa00380",   # example pathway
+  species = "hsa",
+  out.suffix = "Macrophage"
+)
+```
